@@ -34,7 +34,8 @@ impl TryFrom<&[u8]> for RiffChunk{
        while index < value.len(){
             let chunk = Chunk::try_from(&value[index..])?;
             //move to next chunk
-            index += (chunk.size as usize) + 8;
+            let padding = (chunk.size as usize) % 2 ;
+            index += (chunk.size as usize) + 8 + padding;
             // add chunk to list
             data.push(chunk);
        }
@@ -65,6 +66,8 @@ enum ChunkError{
     ChannelMaskError(),
     BlockAlignError(),
     ValidBitsError(),
+    ListTypeError(),
+    InfoError(),
 }
 impl TryFrom<&[u8]> for Chunk{
     type Error = ChunkError;
@@ -89,6 +92,7 @@ impl TryFrom<&[u8]> for Chunk{
             "fmt " => ChunkData::Fmt(
                 FmtChunk::try_from(value)?
             ),
+            "LIST" => ChunkData::List(ListChunk::try_from(value)?),
             _ => ChunkData::Unknown(raw_data.to_vec())
         };
         // let data = value[8..(8 + size as usize)].to_vec();
@@ -104,10 +108,52 @@ impl TryFrom<&[u8]> for Chunk{
 #[derive(Debug)]
 enum ChunkData{
     Riff { file_type: String, subchunks: Vec<Chunk>},
-    List { list_type: String, subchunks: Vec<Chunk>},
+    List (ListChunk),
     Fmt(FmtChunk),
     Data(Vec<u8>),
     Unknown(Vec<u8>)
+}
+
+#[derive(Debug)]
+struct ListChunk{
+    list_type: String,
+    data: ListData,
+}
+impl TryFrom<&[u8]> for ListChunk{
+    type Error = ChunkError;
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+        if value.len() < 8 {return Err(ChunkError::SizeError()); }
+
+        //get the id
+        let id = str::from_utf8(&value[0..4])
+            .map_err(|_| ChunkError::IdError())?
+            .to_string();
+
+        // confirm id
+        if id != "LIST" {return Err(ChunkError::IdError())};
+
+        // get size
+        let size = u32::from_le_bytes(value[4..8]
+            .try_into()
+            .map_err(|_|ChunkError::SizeError())?);
+
+        // get list type
+        let list_type = str::from_utf8(&value[8..12])
+            .map_err(|_| ChunkError::ListTypeError())?
+            .to_string();
+
+        // get data
+        let data_end_i = size as usize + 8; // accounts for the size of the list_type field
+        let data = match list_type.as_str(){
+            "INFO" => ListData::Info(InfoData::try_from(&value[12..data_end_i]).map_err(|_| ChunkError::InfoError())?),
+                _=> ListData::Other(value[12..data_end_i].to_vec())
+        };
+
+        return Ok(Self{
+            list_type,
+            data
+        });
+    }
 }
 
 #[derive(Debug)]
@@ -130,9 +176,9 @@ impl TryFrom<&[u8]> for FmtChunk{
         if id != "fmt " { return Err(ChunkError::IdError())}
 
         // get size
-        let size = u32::from_le_bytes(value[4..8]
-            .try_into()
-            .map_err(|_|ChunkError::SizeError())?);
+        // let size = u32::from_le_bytes(value[4..8]
+        //     .try_into()
+        //     .map_err(|_|ChunkError::SizeError())?);
 
         
         // get format code
@@ -275,16 +321,121 @@ impl TryFrom<&[u8]> for ExtensibleFmt{
     }
 }
 
+#[derive(Debug)]
+enum ListData{
+    Info(InfoData),
+    Other(Vec<u8>)
+
+}
+#[derive(Debug)]
+struct InfoData{
+    iarl: Option<String>, // The location where the subject of the file is archived
+    iart: Option<String>, // The artist of the original subject of the file
+    icms: Option<String>, // The name of the person or organization that commissioned the original subject of the file
+    icmt: Option<String>, // General comments about the file or its subject
+    icop: Option<String>, // Copyright information about the file (e.g., "Copyright Some Company 2011")
+    icrd: Option<String>, // The date the subject of the file was created (creation date) (e.g., "2022-12-31")
+    icrp: Option<String>, // Whether and how an image was cropped
+    idim: Option<String>, // The dimensions of the original subject of the file
+    idpi: Option<String>, // Dots per inch settings used to digitize the file
+    ieng: Option<String>, // The name of the engineer who worked on the file
+    ignr: Option<String>, // The genre of the subject
+    ikey: Option<String>, // A list of keywords for the file or its subject
+    ilgt: Option<String>, // Lightness settings used to digitize the file
+    imed: Option<String>, // Medium for the original subject of the file
+    inam: Option<String>, // Title of the subject of the file (name)
+    iplt: Option<String>, // The number of colors in the color palette used to digitize the file
+    iprd: Option<String>, // Name of the title the subject was originally intended for
+    isbj: Option<String>, // Description of the contents of the file (subject)
+    isft: Option<String>, // Name of the software package used to create the file
+    isrc: Option<String>, // The name of the person or organization that supplied the original subject of the file
+    isrf: Option<String>, // The original form of the material that was digitized (source form)
+    itch: Option<String>, // The name of the technician who digitized the subject file
+}
+impl InfoData{
+    fn initialize()->Self{
+        return Self{
+            iarl: None,
+            iart: None,
+            icms: None,
+            icmt: None,
+            icop: None,
+            icrd: None,
+            icrp: None,
+            idim: None,
+            idpi: None,
+            ieng: None,
+            ignr: None,
+            ikey: None,
+            ilgt: None,
+            imed: None,
+            inam: None,
+            iplt: None,
+            iprd: None,
+            isbj: None,
+            isft: None,
+            isrc: None,
+            isrf: None,
+            itch: None,
+        }
+    }
+}
+
+impl TryFrom<&[u8]> for InfoData{
+    type Error = ChunkError;
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+       let mut data = InfoData::initialize();
+       let mut index = 0;
+       while index < value.len(){
+           // get infoid
+           let info_id = str::from_utf8(&value[index..index + 4]).map_err(|_| ChunkError::IdError())?.to_string();
+           // get infoSize
+           let info_size = u32::from_le_bytes(value[index + 4 .. index + 8].try_into().map_err(|_|ChunkError::SizeError())?);
+           // get info
+           let info_string = str::from_utf8(&value[index + 8.. index + 8 + info_size as usize - 1]).map_err(|_| ChunkError::InfoError())?.to_string(); // - 1 is the null char
+           // handle padding
+           let padding = info_size % 2;
+           // set property on data to Some
+           match info_id.as_str(){
+            "IARL" => data.iarl = Some(info_string),
+            "IART" => data.iart = Some(info_string),
+            "ICMS" => data.icms = Some(info_string),
+            "ICMT" => data.icmt = Some(info_string),
+            "ICOP" => data.icop = Some(info_string),
+            "ICRD" => data.icrd = Some(info_string),
+            "ICRP" => data.icrp = Some(info_string),
+            "IDIM" => data.idim = Some(info_string),
+            "IDPI" => data.idpi = Some(info_string),
+            "IENG" => data.ieng = Some(info_string),
+            "IGNR" => data.ignr = Some(info_string),
+            "IKEY" => data.ikey = Some(info_string),
+            "ILGT" => data.ilgt = Some(info_string),
+            "IMED" => data.imed = Some(info_string),
+            "INAM" => data.inam = Some(info_string),
+            "IPLT" => data.iplt = Some(info_string),
+            "IPRD" => data.iprd = Some(info_string),
+            "ISBJ" => data.isbj = Some(info_string),
+            "ISFT" => data.isft = Some(info_string),
+            "ISRC" => data.isrc = Some(info_string),
+            "ISRF" => data.isrf = Some(info_string),
+            "ITCH" => data.itch = Some(info_string),
+            _ => unimplemented!(),
+           }
+           // advance index
+           index += 8 + info_size as usize + padding as usize;
+       }
+       Ok(data)
+    }
+}
 
 fn main(){
     let foat_path = "media/foat.wav";
     let bytes = get_file_bytes(foat_path).unwrap();
     let riff = RiffChunk::try_from(&bytes[0..]).unwrap();
     for chunk in riff.data{
-        match chunk.data{
-              ChunkData::Fmt(FmtChunk::Pcm(d))  => println!("{} {}", d.sample_rate, d.bits_per_sample),
-              ChunkData::Fmt(FmtChunk::Extensible(d))  => println!("{} {}", d.sample_rate, d.bits_per_sample),
-              _ => ()
+        println!("Chunk Type: {}", chunk.id);
+        if let ChunkData::List(list_chunk) = chunk.data{
+            println!("{:?}", list_chunk.data);
         }
     }
 }
