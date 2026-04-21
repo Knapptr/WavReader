@@ -60,7 +60,11 @@ enum ChunkError{
     ChannelCountError(),
     SampleRateError(),
     BytesPerSecondError(),
-    BitsPerSampleError()
+    CBSizeError(),
+    BitsPerSampleError(),
+    ChannelMaskError(),
+    BlockAlignError(),
+    ValidBitsError(),
 }
 impl TryFrom<&[u8]> for Chunk{
     type Error = ChunkError;
@@ -140,7 +144,9 @@ impl TryFrom<&[u8]> for FmtChunk{
         match format_code{
             0x0001 => Ok(Self::Pcm( PCMFmt::try_from(&value[8..])
                     .map_err(|_|ChunkError::FormatCodeError() )?)),
-            _ => unimplemented!()
+            0xFFFE => Ok(Self::Extensible((ExtensibleFmt::try_from(&value[8..])
+                        .map_err(|_| ChunkError::FormatCodeError())?))),
+            _ => {println!("Formatcode: {}", format_code); unimplemented!()}
         }
     }
 }
@@ -151,6 +157,7 @@ struct PCMFmt{
     number_of_channels: u16,
     sample_rate: u32,
     bytes_per_second: u32,
+    block_align: u16,
     bits_per_sample: u16,
 }
 impl TryFrom<&[u8]> for PCMFmt{
@@ -175,7 +182,11 @@ impl TryFrom<&[u8]> for PCMFmt{
             .try_into()
             .map_err(|_|ChunkError::BytesPerSecondError())?);
 
-        let bits_per_sample = u16::from_le_bytes(value[12..14]
+        let block_align = u16::from_le_bytes(value[12..14]
+            .try_into()
+            .map_err(|_| ChunkError::BlockAlignError())?);
+
+        let bits_per_sample = u16::from_le_bytes(value[14..16]
             .try_into()
             .map_err(|_| ChunkError::BitsPerSampleError())?);
 
@@ -184,7 +195,8 @@ impl TryFrom<&[u8]> for PCMFmt{
             sample_rate,
             bytes_per_second,
             bits_per_sample,
-            format_code
+            block_align,
+            format_code,
         })
     }
 }
@@ -194,17 +206,85 @@ struct ExtensibleFmt{
     number_of_channels: u16,
     sample_rate: u32,
     bytes_per_second: u32,
+    block_align: u16,
     bits_per_sample: u16,
-    extra_param_size: u16,
-    extra_params: u32, // this field is u32, but maybe could be more depending on the extra_param_size? It is hard to find information about the extensible fmt
+    cb_size: u16,
+    valid_bits_per_sample: u16,
+    channel_mask: u32,
+    sub_format: [u8; 16],
+}
+
+impl TryFrom<&[u8]> for ExtensibleFmt{
+    type Error = ChunkError;
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+       //get format code         
+       let format_code = u16::from_le_bytes(value[0..2].try_into().map_err(|_| ChunkError::FormatCodeError())?);
+
+       // get number of channels
+       let number_of_channels = u16::from_le_bytes(value[2..4].try_into().map_err(|_| ChunkError::ChannelCountError())?);
+
+       // get sample rate
+       let sample_rate = u32::from_le_bytes(value[4..8].try_into().map_err(|_| ChunkError::SampleRateError())?);
+
+       // get data rate
+        let bytes_per_second = u32::from_le_bytes(value[8..12]
+            .try_into()
+            .map_err(|_|ChunkError::BytesPerSecondError())?);
+
+        // //get black align
+        let block_align = u16::from_le_bytes(value[12..14]
+            .try_into()
+            .map_err(|_| ChunkError::BlockAlignError())?);
+        // get bits per sample
+        let bits_per_sample = u16::from_le_bytes(value[14..16]
+            .try_into()
+            .map_err(|_| ChunkError::BitsPerSampleError())?);
+
+        // get cb size
+        let cb_size = u16::from_le_bytes(value[16..18]
+            .try_into()
+            .map_err(|_|ChunkError::CBSizeError())?);
+            //
+        let valid_bits_per_sample = u16::from_le_bytes(value[18..20]
+            .try_into()
+            .map_err(|_|ChunkError::ValidBitsError())?);
+
+        // get channel mask
+        let channel_mask = u32::from_le_bytes(value[20..24]
+            .try_into()
+            .map_err(|_| ChunkError::ChannelMaskError())?);
+
+        // get subformat
+        let sub_format :[u8;16] = value[24..40]
+            .try_into()
+            .map_err(|_| ChunkError::ChannelMaskError())?;
+
+        return Ok(Self{
+            sample_rate,
+            sub_format,
+            channel_mask,
+            number_of_channels,
+            valid_bits_per_sample,
+            cb_size,
+            bytes_per_second,
+            bits_per_sample,
+            format_code,
+            block_align,
+
+        })
+    }
 }
 
 
 fn main(){
-    let snore_path = "/home/tknapp/snore.wav";
-    let bytes = get_file_bytes(snore_path).unwrap();
+    let foat_path = "media/foat.wav";
+    let bytes = get_file_bytes(foat_path).unwrap();
     let riff = RiffChunk::try_from(&bytes[0..]).unwrap();
     for chunk in riff.data{
-        println!("{}", chunk.id);
+        match chunk.data{
+              ChunkData::Fmt(FmtChunk::Pcm(d))  => println!("{} {}", d.sample_rate, d.bits_per_sample),
+              ChunkData::Fmt(FmtChunk::Extensible(d))  => println!("{} {}", d.sample_rate, d.bits_per_sample),
+              _ => ()
+        }
     }
 }
